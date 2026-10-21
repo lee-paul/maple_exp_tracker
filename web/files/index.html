@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Maple Tracker Ranks</title>
+<style>
+:root{--bg:#f4f6fa;--card:#fff;--ink:#141a26;--dim:#667085;--line:#e1e6ee;--accent:#0a9f86;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-mode="light"]){--bg:#0b0f17;--card:#141b28;--ink:#e6edf7;--dim:#8391a7;--line:#222c3d}}
+:root[data-mode="dark"]{--bg:#0b0f17;--card:#141b28;--ink:#e6edf7;--dim:#8391a7;--line:#222c3d}
+:root[data-accent="amber"]{--accent:#e08a00}:root[data-accent="violet"]{--accent:#7c5cff}:root[data-accent="rose"]{--accent:#e0457b}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100%}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:18px;margin:0;flex:1;min-width:160px}h1 b{color:var(--accent)}
+select,input,textarea,button{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+button{cursor:pointer}button.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+nav{display:flex;gap:6px;padding:10px 16px;flex-wrap:wrap}nav button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+main{padding:6px 16px 40px;max-width:1100px;margin:auto}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px;align-items:center}.dim{color:var(--dim)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;position:relative}
+.rank{position:absolute;top:10px;right:12px;font-weight:700;color:var(--dim)}.big{font-size:26px;font-weight:700}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:700;color:#111}
+.me{outline:2px solid var(--accent)}.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:560px}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--dim);font-weight:600}
+.row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}.row .fill{flex:1;height:8px;background:var(--line);border-radius:9px;overflow:hidden}
+.row .fill i{display:block;height:100%;background:var(--accent)}.prog{height:10px;background:var(--line);border-radius:9px;overflow:hidden;margin:6px 0}.prog i{display:block;height:100%;background:var(--accent)}
+textarea{width:100%;min-height:130px;font-family:ui-monospace,Consolas,monospace;font-size:12px}.pill{padding:3px 9px;border:1px solid var(--line);border-radius:99px;margin:2px;display:inline-block}
+.f{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}a{text-decoration:none}</style></head><body>
+<header><h1>🍁 Maple <b>Tracker</b> Ranks</h1>
+<select id="mode" title="Mode"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>
+<select id="accent" title="Accent"><option value="teal">Teal</option><option value="amber">Amber</option><option value="violet">Violet</option><option value="rose">Rose</option></select></header>
+<nav id="tabs"></nav><main id="main"></main>
+<script>
+// ---- configure these two (Supabase > Project Settings > API) and your release link ----
+const SB_URL="https://shbotrebianwkibexqcn.supabase.co";   // e.g. "https://abcdxyz.supabase.co"
+const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoYm90cmViaWFud2tpYmV4cWNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI1NTUzNTAsImV4cCI6MjEwODEzMTM1MH0.gSwds8itoLIoKl-_Gj2Ea5lMed8tNzfNT-x8RGDFm9w";   // the public "anon" key (safe to expose; row-level security protects the data)
+const DOWNLOAD_URL="https://github.com/YOUR_USER/YOUR_REPO/releases/latest/download/MapleTracker-windows.zip";
+const $=s=>document.querySelector(s);
+const TIERS=[{n:"Bronze",min:0,c:"#cd7f32"},{n:"Silver",min:4,c:"#b8c2cc"},{n:"Gold",min:8,c:"#f5c542"},{n:"Platinum",min:14,c:"#5ad1c8"},{n:"Diamond",min:22,c:"#6aa7ff"},{n:"Master",min:35,c:"#c77dff"},{n:"Legend",min:55,c:"#ff6b6b"}];
+const tierOf=p=>[...TIERS].reverse().find(t=>p>=t.min);
+const nextTier=p=>TIERS.find(t=>t.min>p);
+const fmt=n=>{if(n==null||isNaN(n))return"–";const a=Math.abs(n);for(const[d,s]of[[1e9,"B"],[1e6,"M"],[1e3,"K"]])if(a>=d)return(n/d).toFixed(2)+s;return Math.round(n).toLocaleString()};
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem("mt_"+k);localStorage.setItem("mt_"+k,v)}catch(e){}};
+const S={players:[],uid:pref("pid"),cls:"all",tab:"board",layout:pref("layout")||"cards",sort:"rating",band:"all",demo:false,msg:""};
+const BANDS={all:[1,99],low:[1,29],mid:[30,69],high:[70,99]};
+
+function agg(p){const ss=(p.sessions||[]).filter(s=>s.elapsed_sec>=600&&s.pct_per_hr>0&&s.pct_per_hr<=400).sort((a,b)=>a.ended<b.ended?-1:1);
+ const last=ss.slice(-5),avg=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:0,pa=avg(last.map(s=>s.pct_per_hr));
+ return{...p,ss,pctAvg:pa,rating:Math.round(pa*100),best:Math.max(0,...ss.map(s=>s.pct_per_hr)),expHr:avg(last.map(s=>s.exp_per_hr)),
+  mesoHr:avg(last.map(s=>s.meso_per_hr)),level:ss.length?ss[ss.length-1].start_level:0,cls:(ss.at(-1)||{}).class||"",map:(ss.at(-1)||{}).map||"",party:(ss.at(-1)||{}).party_size||0,hours:ss.reduce((x,s)=>x+s.elapsed_sec,0)/3600,tier:tierOf(pa)}}
+function demo(){const n=["Aria","Bolt","Cinder","Dune","Echo","Fable","Grim","Hex","Iris","Juno","Kite","Lumen"];
+ return n.map((x,i)=>({id:"d"+i,name:x+" (sample)",sessions:Array.from({length:6},(_,k)=>({ended:"2026-10-0"+(k+1),elapsed_sec:3600+k*900,start_level:25+i*5+k%2,pct_per_hr:(4+i*3.5)*(0.85+((i*7+k*3)%10)/33),exp_per_hr:(50+i*40)*1e3,meso_per_hr:(i+1)*2e5,levels_gained:1}))}))}
+const all=()=>(S.demo?demo():S.players).map(agg).filter(p=>p.ss.length);
+const inBand=p=>{const[a,b]=BANDS[S.band];return p.level>=a&&p.level<=b};
+
+function badges(p){const b=[];if(p.hours>=10)b.push("⏱ 10h grinder");if(p.ss.some(s=>s.elapsed_sec>=7200))b.push("🏃 Marathon 2h+");
+ if(p.ss.length>=5)b.push("📈 Regular (5+ runs)");if(p.ss.some(s=>s.levels_gained>=2))b.push("⚡ Double level-up");if(p.ss.some(s=>s.meso_per_hr>=1e6))b.push("💰 1M+ mesos/hr");
+ if(p.ss.length>=3&&p.ss.at(-1).pct_per_hr>p.ss[0].pct_per_hr*1.25)b.push("🚀 Improving");return b}
+const tb=t=>`<span class="badge" style="background:${t.c}">${t.n}</span>`;
+function spark(v){if(v.length<2)return"";const lo=Math.min(...v),hi=Math.max(...v),r=hi-lo||1;
+ const pts=v.map((y,i)=>`${i*(300/(v.length-1))},${46-(y-lo)/r*40}`).join(" ");return`<svg viewBox="0 0 300 50" width="100%" height="50"><polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2.5"/></svg>`}
+
+function board(){let ps=all().filter(inBand).filter(p=>S.cls==="all"||p.cls===S.cls);const k={rating:"rating",pct:"pctAvg",exp:"expHr",meso:"mesoHr",best:"best"}[S.sort];ps.sort((a,b)=>b[k]-a[k]);
+ const bar=`<div class="bar"><select id="layout"><option value="cards">Cards</option><option value="table">Table</option><option value="compact">Compact</option></select>
+ <select id="sort"><option value="rating">Sort: rating</option><option value="pct">%/hr</option><option value="exp">EXP/hr</option><option value="meso">Mesos/hr</option><option value="best">Best run</option></select>
+ <select id="band"><option value="all">All levels</option><option value="low">Lv 1–29</option><option value="mid">Lv 30–69</option><option value="high">Lv 70–99</option></select>
+ <select id="cls"><option value="all">All classes</option>${[...new Set(all().map(p=>p.cls).filter(Boolean))].sort().map(c=>`<option>${esc(c)}</option>`).join("")}</select> <label class="dim"><input type="checkbox" id="demo" ${S.demo?"checked":""}> sample data</label></div>`;
+ if(!ps.length)return bar+`<p class="dim">No ranked players yet. Submit a session from the tracker (Submit tab) or switch on sample data to preview layouts.</p>`;
+ const mx=ps[0][k]||1;let h;
+ if(S.layout==="table")h=`<div class="wrap"><table><tr><th>#</th><th>Player</th><th>Tier</th><th>Class</th><th>Map</th><th>Party</th><th>Rating</th><th>%/hr</th><th>EXP/hr</th><th>Mesos/hr</th><th>Best</th><th>Runs</th></tr>${ps.map((p,i)=>`<tr class="${p.id===S.uid?"me":""}"><td>${i+1}</td><td>${esc(p.name)}</td><td>${tb(p.tier)}</td><td>${esc(p.cls)}</td><td>${esc(p.map)}</td><td>${p.party||"–"}</td><td>${p.rating}</td><td>${p.pctAvg.toFixed(1)}%</td><td>${fmt(p.expHr)}</td><td>${fmt(p.mesoHr)}</td><td>${p.best.toFixed(1)}%</td><td>${p.ss.length}</td></tr>`).join("")}</table></div>`;
+ else if(S.layout==="compact")h=ps.map((p,i)=>`<div class="row ${p.id===S.uid?"me":""}"><b style="width:28px">${i+1}</b><span style="width:130px;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</span>${tb(p.tier)}<div class="fill"><i style="width:${p[k]/mx*100}%"></i></div><b>${p.rating}</b></div>`).join("");
+ else h=`<div class="grid">${ps.map((p,i)=>`<div class="card ${p.id===S.uid?"me":""}"><span class="rank">#${i+1}</span><div>${tb(p.tier)} <span class="dim">Lv ${p.level}</span></div><div style="font-weight:600;margin-top:4px">${esc(p.name)}</div><div class="dim">${esc(p.cls)}${p.map?" · "+esc(p.map):""}${p.party>1?" · party of "+p.party:p.party===1?" · solo":""}</div><div class="big">${p.rating}</div><div class="dim">rating</div><div class="prog"><i style="width:${p[k]/mx*100}%"></i></div>
+ <div class="dim">${p.pctAvg.toFixed(1)}%/hr · ${fmt(p.expHr)} EXP/hr · ${fmt(p.mesoHr)} mesos/hr</div></div>`).join("")}</div>`;
+ return bar+h}
+
+function me(){const p=all().find(x=>x.id===S.uid);if(!p)return`<p class="dim">${S.uid||S.demo?"No sessions submitted yet. Use the Submit tab.":"Submit a session from this browser to see your stats."}</p>`;
+ const everyone=all().flatMap(x=>x.ss.map(s=>s.pct_per_hr)),last=p.ss.at(-1),pct=Math.round(everyone.filter(v=>v<=last.pct_per_hr).length/everyone.length*100);
+ const eff=p.ss.length>1?last.pct_per_hr/(p.ss.slice(0,-1).slice(-5).reduce((a,s)=>a+s.pct_per_hr,0)/Math.min(5,p.ss.length-1))*100:null,nt=nextTier(p.pctAvg);
+ const prog=nt?(p.pctAvg-p.tier.min)/(nt.min-p.tier.min)*100:100;
+ return`<div class="grid"><div class="card"><div>${tb(p.tier)}</div><div class="big">${p.rating}</div><div class="dim">rating (avg of last 5 runs)</div>
+ <div class="prog"><i style="width:${prog}%"></i></div><div class="dim">${nt?`${(nt.min-p.pctAvg).toFixed(1)}%/hr to ${nt.n}`:"Top tier reached"}</div></div>
+ <div class="card"><div class="big">${eff==null?"–":Math.round(eff)+"%"}</div><div class="dim">last run vs. your previous 5 (efficiency)</div></div>
+ <div class="card"><div class="big">Top ${100-pct||1}%</div><div class="dim">last run vs. every submitted run</div></div>
+ <div class="card"><div class="big">${p.hours.toFixed(1)}h</div><div class="dim">${p.ss.length} runs tracked</div></div></div>
+ <h3>Trend (%/hr per run)</h3><div class="card">${spark(p.ss.map(s=>s.pct_per_hr))}</div>
+ <h3>Badges</h3><div>${badges(p).map(b=>`<span class="pill">${b}</span>`).join("")||'<span class="dim">Keep grinding to unlock badges.</span>'}</div>
+ <h3>Runs</h3><div class="wrap"><table><tr><th>Ended</th><th>Length</th><th>Lv</th><th>%/hr</th><th>EXP/hr</th><th>Mesos/hr</th><th>Details</th></tr>${[...p.ss].reverse().map(s=>`<tr><td>${esc(s.ended)}</td><td>${(s.elapsed_sec/3600).toFixed(2)}h</td><td>${s.start_level||"–"}</td><td>${s.pct_per_hr.toFixed(1)}%</td><td>${fmt(s.exp_per_hr)}</td><td>${fmt(s.meso_per_hr)}</td><td style="white-space:normal;min-width:220px">${esc([s.class,s.map,s.party_size>1?"party of "+s.party_size:s.party_size===1?"solo":"",s.route,s.notes].filter(Boolean).join(" · "))}</td></tr>`).join("")}</table></div>`}
+
+function submitView(){const c=["Beginner","Warrior","Fighter","Page","Spearman","Magician","Cleric","Fire/Poison Wizard","Ice/Lightning Wizard","Bowman","Hunter","Crossbowman","Thief","Assassin","Bandit"];
+ return`<p>Press ⟲ in the tracker to upload a run straight from the app, or paste/upload sessions from <code>maple_sessions.jsonl</code> here and add context below.</p>
+ <div class="f"><input id="nm" placeholder="Display name" maxlength="24" value="${esc(pref("name")||"")}"><input id="cls2" list="cl" placeholder="Class" maxlength="30"><datalist id="cl">${c.map(x=>`<option>${x}</option>`).join("")}</datalist>
+ <input id="map" placeholder="Map (e.g. Ant Tunnel II)" maxlength="80"><select id="party"><option value="1">Solo</option>${[2,3,4,5,6].map(n=>`<option value="${n}">Party of ${n}</option>`).join("")}</select></div>
+ <div class="f" style="margin-top:8px"><textarea id="route" maxlength="300" style="min-height:70px" placeholder="Route / how you farmed (e.g. clockwise loop, 2 portals, buffed)"></textarea><textarea id="notes" maxlength="500" style="min-height:70px" placeholder="Other details: buffs, EXP coupons, gear, channel, crowding…"></textarea></div>
+ <input type="file" id="file" accept=".json,.jsonl,.txt" style="margin:8px 0"><textarea id="ta" placeholder="…or paste session JSON here"></textarea>
+ <div class="bar"><button class="pri" id="go">Submit sessions</button><span id="msg" class="dim">${esc(S.msg)}</span></div>
+ <p class="dim">Self-reported, so rankings are for fun and not verified. Only your display name and the stats and notes you enter are stored.</p>`}
+function getView(){return`<div class="card"><h3 style="margin-top:0">Download the tracker</h3><p>Windows app, no Python needed. Unzip and run <code>MapleTracker.exe</code>.</p>
+ ${DOWNLOAD_URL?`<p><a href="${esc(DOWNLOAD_URL)}"><button class="pri">⬇ Download for Windows</button></a></p>`:'<p class="dim">Download link not configured yet.</p>'}
+ <ol><li>Run the game in Windowed or Borderless mode.</li><li>Drag a box around the EXP text, then the meso number.</li><li>Press ⟲ when you’re done to save and upload your run.</li></ol>
+ <p class="dim">Windows may show a SmartScreen warning because the app isn’t code-signed: choose “More info”, then “Run anyway”. It only reads pixels in the boxes you pick.</p></div>`}
+function tiersView(){return`<p>Tiers use <b>% of a level gained per hour</b>, so they’re fair at any level. Rating = average %/hr of your last 5 runs × 100. Efficiency compares your latest run to your own recent average.</p>
+ <div class="grid">${TIERS.map((t,i)=>`<div class="card">${tb(t)}<div class="big">${t.min}%+</div><div class="dim">per hour${TIERS[i+1]?` (up to ${TIERS[i+1].min}%)`:""}</div></div>`).join("")}</div>`}
+
+function parseSessions(t){t=t.trim();if(!t)return[];let a;try{const j=JSON.parse(t);a=Array.isArray(j)?j:[j]}catch(e){a=t.split(/\n+/).map(l=>{try{return JSON.parse(l)}catch(e){return null}}).filter(Boolean)}
+ return a.map(s=>({player_id:s.player_id,ended:String(s.ended||"").slice(0,25),elapsed_sec:Math.round(+s.elapsed_sec),start_level:Math.round(+s.start_level||0),levels_gained:Math.round(+s.levels_gained||0),pct_per_hr:+s.pct_per_hr,exp_per_hr:Math.round(+s.exp_per_hr||0),meso_per_hr:Math.round(+s.meso_per_hr||0),class:s.class,map:s.map,route:s.route,party_size:s.party_size?Math.min(6,Math.max(1,+s.party_size)):null,notes:s.notes}))
+ .filter(s=>s.ended&&s.elapsed_sec>=600&&s.pct_per_hr>0&&s.pct_per_hr<=400)}
+const hdr=()=>({apikey:SB_KEY,Authorization:"Bearer "+SB_KEY,"Content-Type":"application/json"});
+async function submit(){const v=id=>$(id).value.trim(),say=m=>{S.msg=m;$("#msg").textContent=m},name=(v("#nm")||"Player").slice(0,24);
+ const add=parseSessions($("#ta").value);if(!add.length)return say("No valid sessions found (need 10+ minutes of data).");
+ if(!SB_URL)return say("This site isn’t connected to a database yet (set SB_URL and SB_KEY).");
+ const pid=add[0].player_id||pref("pid")||crypto.randomUUID();pref("pid",pid);pref("name",name);
+ const det={class:v("#cls2").slice(0,30)||null,map:v("#map").slice(0,80)||null,route:v("#route").slice(0,300)||null,party_size:+$("#party").value||1,notes:v("#notes").slice(0,500)||null};
+ const rows=add.map(s=>({player_id:pid,name,ended:s.ended,elapsed_sec:s.elapsed_sec,start_level:Math.min(99,s.start_level),levels_gained:s.levels_gained,pct_per_hr:s.pct_per_hr,exp_per_hr:s.exp_per_hr,meso_per_hr:s.meso_per_hr,
+  class:s.class||det.class,map:s.map||det.map,route:s.route||det.route,party_size:s.party_size||det.party_size,notes:s.notes||det.notes}));
+ try{const r=await fetch(SB_URL+"/rest/v1/sessions?on_conflict=player_id,ended",{method:"POST",headers:{...hdr(),Prefer:"resolution=ignore-duplicates,return=minimal"},body:JSON.stringify(rows)});
+  if(!r.ok)throw new Error((await r.text()).slice(0,140));say(`Saved ${rows.length} session(s).`);S.uid=pid;await load();S.tab="me";draw()}
+ catch(e){say("Couldn’t save: "+e.message)}}
+async function load(){if(!SB_URL)return;try{const r=await fetch(SB_URL+"/rest/v1/sessions?select=*&order=created_at.desc&limit=3000",{headers:hdr()}),rows=await r.json(),m=new Map();
+ rows.forEach(x=>{const p=m.get(x.player_id)||{id:x.player_id,name:x.name,sessions:[]};p.sessions.push(x);m.set(x.player_id,p)});S.players=[...m.values()]}catch(e){S.players=[]}}
+
+function draw(){const T={board:["🏆 Leaderboard",board],me:["📊 My stats",me],submit:["📤 Submit",submitView],tiers:["🎖 Tiers",tiersView],get:["⬇ Download",getView]};
+ $("#tabs").innerHTML=Object.entries(T).map(([k,v])=>`<button data-t="${k}" class="${k===S.tab?"on":""}">${v[0]}</button>`).join("");
+ $("#main").innerHTML=T[S.tab][1]();
+ document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>{S.tab=b.dataset.t;draw()});
+ const on=(id,fn)=>{const e=$(id);if(e)fn(e)};
+ on("#layout",e=>{e.value=S.layout;e.onchange=()=>{S.layout=e.value;pref("layout",e.value);draw()}});
+ on("#sort",e=>{e.value=S.sort;e.onchange=()=>{S.sort=e.value;draw()}});on("#band",e=>{e.value=S.band;e.onchange=()=>{S.band=e.value;draw()}});
+ on("#cls",e=>{e.value=S.cls;e.onchange=()=>{S.cls=e.value;draw()}});on("#demo",e=>e.onchange=()=>{S.demo=e.checked;draw()});on("#go",e=>e.onclick=submit);
+ on("#file",e=>e.onchange=()=>{const f=e.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$("#ta").value=r.result};r.readAsText(f)})}
+function theme(){const R=document.documentElement,m=pref("mode")||"auto",a=pref("accent")||"teal";
+ m==="auto"?R.removeAttribute("data-mode"):R.setAttribute("data-mode",m);R.setAttribute("data-accent",a);$("#mode").value=m;$("#accent").value=a}
+$("#mode").onchange=e=>{pref("mode",e.target.value);theme()};$("#accent").onchange=e=>{pref("accent",e.target.value);theme()};
+theme();draw();
+(async()=>{await load();draw()})();
+</script></body></html>

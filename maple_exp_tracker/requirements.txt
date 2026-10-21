@@ -1,4 +1,0 @@
-mss
-pillow
-numpy
-rapidocr-onnxruntime

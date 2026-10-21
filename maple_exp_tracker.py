@@ -4,7 +4,8 @@ Reads the on-screen EXP text, e.g. "EXP. 55,784 [28.63%]", and the meso box
 via OCR on screenshot regions you choose. It never touches the game process.
 The EXP table is used to work out your level and to validate every reading.
 """
-import csv, ctypes, json, re, threading, time, urllib.request, uuid, tkinter as tk
+import csv, ctypes, faulthandler, json, logging, os, re, sys, tempfile, threading, time, urllib.request, uuid
+import tkinter as tk
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -39,16 +40,47 @@ NEED = {
     9482161548
 }
 
-CFG_PATH = Path.home() / ".maple_exp_tracker.json"
-LOG_PATH = Path.home() / "maple_sessions.csv"
+
+
+def _data_dir():
+    """Visible data folder (~/MapleTracker) with fallbacks if it isn't writable."""
+    for base in (Path.home(), Path.cwd(), Path(tempfile.gettempdir())):
+        try:
+            d = base / "MapleTracker"
+            d.mkdir(exist_ok=True)
+            (d / ".w").write_text("ok")
+            return d
+        except Exception:
+            continue
+    return Path.cwd()
+
+
+DATA_DIR = _data_dir()
+CFG_PATH = DATA_DIR / "config.json"
+OLD_CFG = Path.home() / ".maple_exp_tracker.json"
+LOG_PATH = DATA_DIR / "maple_sessions.csv"
+AUTOSAVE_PATH = DATA_DIR / "current_session.json"
+CSV_COLS = ["ended", "elapsed_sec", "start_level", "levels_gained", "exp_gained", "pct_gained", "pct_per_hr",
+            "exp_per_hr", "meso_gained", "meso_spent", "meso_per_hr", "deaths", "class", "map", "route",
+            "party_size", "notes"]
+THEMES = {"Teal": "#00f0c8", "Amber": "#ffb000", "Violet": "#a78bfa", "Rose": "#ff6b9a", "Lime": "#9be564"}
+try:   # errors go to a log file (a windowed exe has no console to show them)
+    logging.basicConfig(filename=str(DATA_DIR / "tracker.log"), level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    _FH = open(DATA_DIR / "crash.log", "a")
+    faulthandler.enable(_FH)
+except Exception:
+    pass
+sys.excepthook = lambda t, v, tb: logging.error("uncaught", exc_info=(t, v, tb))
+threading.excepthook = lambda a: logging.error("thread crashed", exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
 BG, PANEL, FG, DIM = "#0b0f17", "#141b28", "#e6edf7", "#6b7a90"
 ACCENT, MESO, WARN, GOOD = "#00f0c8", "#ffd166", "#ffb347", "#7CFF8A"
 PCT_RE = re.compile(r"(?<!\d)(\d{1,3})\s*[.,]\s*(\d{2})\s*%")
 MESO_RE = re.compile(r"\d{1,3}(?:,\d{3})+|\d+")
 W = 290
-API_URL = "https://shbotrebianwkibexqcn.supabase.co"   # your Supabase project URL, e.g. https://abcdxyz.supabase.co  (leave empty = no uploads)
-API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoYm90cmViaWFud2tpYmV4cWNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI1NTUzNTAsImV4cCI6MjEwODEzMTM1MH0.gSwds8itoLIoKl-_Gj2Ea5lMed8tNzfNT-x8RGDFm9w"   # your Supabase anon (public) key
-JSONL_PATH = Path.home() / "maple_sessions.jsonl"
+API_URL = ""   # your Supabase project URL, e.g. https://abcdxyz.supabase.co  (leave empty = no uploads)
+API_KEY = ""   # your Supabase anon (public) key
+JSONL_PATH = DATA_DIR / "maple_sessions.jsonl"
 # tiers by % of a level gained per hour (same thresholds as the web leaderboard)
 TIERS = [("Bronze", 0, "#cd7f32"), ("Silver", 4, "#b8c2cc"), ("Gold", 8, "#f5c542"),
          ("Platinum", 14, "#5ad1c8"), ("Diamond", 22, "#6aa7ff"), ("Master", 35, "#c77dff"),
@@ -143,7 +175,7 @@ def rate(hist, ck, window, i):
 
 class Tracker:
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.reset()
 
     # ----- state -----
@@ -166,12 +198,13 @@ class Tracker:
         self.cum_exp, self.cum_pct, self.levels = 0, 0.0, 0
         self.hist, self.pending_lvl, self.rejects = [], None, 0
         self.exp_gain_t, self.last_ck = None, 0
+        self.events, self.deaths, self.lost, self.peak = 0, 0, 0, 0.0
         self.cand_hits, self.base_pending, self.jump, self.jump_hits = 0, None, None, 0
         self.first = None
         self.spark, self.next_spark = deque(maxlen=60), 0
 
     def _reset_meso(self):
-        self.m_last, self.m_start, self.m_pending = None, None, None
+        self.m_last, self.m_start, self.m_pending, self.m_rebase = None, None, None, False
         self.m_gain, self.m_spent, self.m_hist, self.m_gain_t = 0, 0, [], None
 
     def clk(self, now):
@@ -187,7 +220,7 @@ class Tracker:
             if self.paused_at:
                 self.paused_total += now - self.paused_at
                 self.paused_at = None
-                self.last, self.m_last, self.base_pending = None, None, None  # re-baseline
+                self.last, self.base_pending, self.m_rebase = None, None, True  # re-baseline (keeps displayed values)
             else:
                 self.paused_at = now
 
@@ -326,10 +359,14 @@ class Tracker:
             dexp = sum(NEED[k] for k in range(L, lv)) - lraw + r
             dpct = (100 - lpct) + p + 100 * (lv - L - 1)
             self.level = lv
-        elif r >= lraw:                     # (a drop at the same level = death penalty, not counted)
+        elif r >= lraw:
             dexp, dpct = r - lraw, max(0.0, p - lpct)
+        elif lraw - r > 3:                  # EXP dropped at the same level = death penalty (not counted)
+            self.deaths += 1
+            self.lost += lraw - r
         dexp = max(0, dexp)
         if dexp > 0 or dpct > 0:
+            self.events += 1
             self.cum_exp += dexp
             self.cum_pct += dpct
             self.exp_gain_t = now
@@ -342,8 +379,8 @@ class Tracker:
             if self.paused_at:
                 return
             ck = self.clk(now)
-            if self.m_last is None:
-                self.m_last = v
+            if self.m_last is None or self.m_rebase:
+                self.m_last, self.m_rebase, self.m_pending = v, False, None
                 if self.m_start is None:
                     self.m_start = v
                     self.m_hist.append((ck, 0, 0))
@@ -376,6 +413,12 @@ class Tracker:
             span = ck - h[0][0] if h else 0
             e["avg_exp"] = self.cum_exp / span * 3600 if span >= 20 else None
             e["avg_pct"] = self.cum_pct / span * 3600 if span >= 20 else None
+            e["events"], e["deaths"], e["lost"] = self.events, self.deaths, self.lost
+            e["hits"] = self.events / span * 60 if span >= 20 else None
+            e["avg_hit"] = self.cum_exp / self.events if self.events else None
+            if e["r5"][0] and ck > 120:
+                self.peak = max(self.peak, e["r5"][0] * 60)
+            e["peak"] = self.peak
             e["remaining"], e["eta"] = None, None
             if self.level and self.last and NEED.get(self.level):
                 e["remaining"] = NEED[self.level] - self.last[0]
@@ -403,9 +446,11 @@ class Tracker:
 class App:
     def __init__(self):
         self.cfg = {}
-        if CFG_PATH.exists():
+        for p in (CFG_PATH, OLD_CFG):
             try:
-                self.cfg = json.loads(CFG_PATH.read_text())
+                if p.exists():
+                    self.cfg = json.loads(p.read_text())
+                    break
             except Exception:
                 pass
         if "region" in self.cfg:  # migrate from v1
@@ -417,10 +462,17 @@ class App:
         self.selecting = not (self.cfg.get("exp_region") and self.cfg.get("meso_region"))
         self.resume_at = 0.0
         self.hist_base = history()
-        self.notice = ""
+        self.notice, self.notice_until, self.fatal = "", 0.0, ""
+        self.last_auto, self.timer_end, self._t60, self._plv, self._tmax = time.time(), None, False, 0, -1
+        self.accent = self.cfg.get("accent", ACCENT)
+        self.compact = bool(self.cfg.get("compact"))
+        self.alpha = float(self.cfg.get("alpha", 0.92))
         if "player_id" not in self.cfg:
             self.cfg["player_id"] = str(uuid.uuid4())
         self.build_ui()
+        self.root.report_callback_exception = lambda *a: logging.error("tk callback", exc_info=a)
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.recover()
         threading.Thread(target=self.worker, daemon=True).start()
         self.refresh()
         if not self.cfg.get("exp_region"):
@@ -447,8 +499,8 @@ class App:
         r = self.root = tk.Tk()
         r.overrideredirect(True)
         r.attributes("-topmost", True)
-        r.attributes("-alpha", 0.92)
-        r.configure(bg=ACCENT)
+        r.attributes("-alpha", self.alpha)
+        r.configure(bg=self.accent)
         r.geometry(self.cfg.get("pos", "+40+40"))
         body = tk.Frame(r, bg=BG)
         body.pack(padx=1, pady=1)
@@ -457,17 +509,16 @@ class App:
         hdr.pack(fill="x")
         self.dot = tk.Label(hdr, text="●", fg=DIM, bg=PANEL, font=("Segoe UI", 10))
         self.dot.pack(side="left", padx=(8, 2))
-        title = tk.Label(hdr, text="MAPLE TRACKER", fg=ACCENT, bg=PANEL, font=("Segoe UI Semibold", 10))
+        title = tk.Label(hdr, text="MAPLE TRACKER", fg=self.accent, bg=PANEL, font=("Segoe UI Semibold", 10))
         title.pack(side="left", pady=5)
-        for txt, tip, cmd in (("✕", "", self.quit), ("⟲", "", self.do_reset), ("⏸", "", self.do_pause),
-                              ("◎", "", lambda: self.select_region("meso")),
-                              ("⌖", "", lambda: self.select_region("exp"))):
-            b = tk.Label(hdr, text=txt, fg=DIM, bg=PANEL, cursor="hand2", font=("Segoe UI Symbol", 11))
+        self.title_lbl = title
+        for txt, cmd in (("X", self.quit), ("NEW", self.do_reset), ("PAUSE", self.do_pause), ("MENU", self.show_menu)):
+            b = tk.Label(hdr, text=txt, fg=DIM, bg=PANEL, cursor="hand2", font=("Segoe UI Semibold", 8))
             b.pack(side="right", padx=5)
             b.bind("<Button-1>", lambda e, c=cmd: c())
-            b.bind("<Enter>", lambda e, w=b: w.config(fg=ACCENT))
+            b.bind("<Enter>", lambda e, w=b: w.config(fg=self.accent))
             b.bind("<Leave>", lambda e, w=b: w.config(fg=DIM))
-            if txt == "⏸":
+            if txt == "PAUSE":
                 self.pause_btn = b
         for w in (hdr, title, self.dot):
             w.bind("<ButtonPress-1>", self.drag_start)
@@ -478,7 +529,7 @@ class App:
         hero.pack(fill="x", padx=14, pady=(8, 0))
         self.hero_lbl = tk.Label(hero, text="EXP / HOUR", fg=DIM, bg=BG, font=("Segoe UI", 8))
         self.hero_lbl.pack(anchor="w")
-        self.hero = tk.Label(hero, text="--", fg=ACCENT, bg=BG, font=("Segoe UI Semibold", 26))
+        self.hero = tk.Label(hero, text="--", fg=self.accent, bg=BG, font=("Segoe UI Semibold", 26))
         self.hero.pack(anchor="w")
         self.tier_lbl = tk.Label(body, text="", fg=DIM, bg=BG, font=("Segoe UI Semibold", 9),
                                  wraplength=W, justify="left")
@@ -489,24 +540,28 @@ class App:
         self.exp_line.bind("<Button-1>", lambda e: self.ask_level())
         self.spark = tk.Canvas(body, width=W, height=32, bg=BG, highlightthickness=0)
         self.spark.pack(padx=14)
-        self.cells = self.grid(body, [
+        self.detail = tk.Frame(body, bg=BG)     # collapsible section (compact view hides it)
+        self.detail.pack(fill="x")
+        self.cells = self.grid(self.detail, [
             ("r1", "EXP / MIN (1m)", FG), ("r5", "EXP / MIN (5m)", FG),
             ("avg", "SESSION AVG / HR", FG), ("pcthr", "% / HOUR", FG),
             ("gain", "EXP GAINED", FG), ("rem", "EXP TO LEVEL", FG),
-            ("eta", "TIME TO LEVEL", FG), ("time", "ELAPSED", FG)])
-        self.bar = tk.Canvas(body, width=W, height=6, bg=PANEL, highlightthickness=0)
+            ("eta", "TIME TO LEVEL", FG), ("time", "ELAPSED", FG),
+            ("hits", "HITS / MIN", FG), ("avghit", "AVG EXP / HIT", FG),
+            ("peak", "PEAK EXP / HR", FG), ("deaths", "DEATHS (EXP LOST)", WARN)])
+        self.bar = tk.Canvas(self.detail, width=W, height=6, bg=PANEL, highlightthickness=0)
         self.bar.pack(padx=14, pady=(6, 4))
 
         # --- Meso ---
-        tk.Frame(body, bg=PANEL, height=1).pack(fill="x", padx=14, pady=4)
-        mh = tk.Frame(body, bg=BG)
+        tk.Frame(self.detail, bg=PANEL, height=1).pack(fill="x", padx=14, pady=4)
+        mh = tk.Frame(self.detail, bg=BG)
         mh.pack(fill="x", padx=14)
         tk.Label(mh, text="MESOS / HOUR", fg=DIM, bg=BG, font=("Segoe UI", 8)).pack(side="left")
         self.meso_hero = tk.Label(mh, text="--", fg=MESO, bg=BG, font=("Segoe UI Semibold", 18))
         self.meso_hero.pack(side="right")
-        self.meso_line = tk.Label(body, text="", fg=DIM, bg=BG, font=("Segoe UI", 8))
+        self.meso_line = tk.Label(self.detail, text="", fg=DIM, bg=BG, font=("Segoe UI", 8))
         self.meso_line.pack(anchor="w", padx=14)
-        self.mcells = self.grid(body, [
+        self.mcells = self.grid(self.detail, [
             ("r1", "MESO / MIN (1m)", MESO), ("r5", "MESO / MIN (5m)", MESO),
             ("avg", "SESSION AVG / HR", MESO), ("net_hr", "NET / HR", MESO),
             ("gain", "GAINED", GOOD), ("spent", "SPENT", WARN)])
@@ -514,6 +569,8 @@ class App:
         self.status = tk.Label(body, text="", fg=DIM, bg=BG, font=("Consolas", 8),
                                wraplength=W, justify="left")
         self.status.pack(anchor="w", padx=14, pady=(6, 8))
+        if self.compact:
+            self.detail.pack_forget()
 
     def drag_start(self, e):
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
@@ -546,6 +603,7 @@ class App:
             top.destroy()
             if region:
                 self.cfg[key + "_region"] = region
+                self.save_cfg()
                 (self.trk.reset_exp if key == "exp" else self.trk.reset_meso)()
             if then:
                 self.root.after(150, then)       # next region: keep OCR off
@@ -573,9 +631,155 @@ class App:
         top.bind("<Escape>", lambda e: finish(None))
         top.focus_force()
 
+    def say(self, msg, secs=8):
+        self.notice, self.notice_until = msg, time.time() + secs
+
+    def beep(self, kind="up"):
+        if not self.cfg.get("sound", True):
+            return
+        seq = {"up": [(784, 120), (988, 120), (1175, 240)], "warn": [(660, 160)],
+               "done": [(880, 220), (880, 220), (660, 420)]}[kind]
+
+        def go():
+            try:
+                import winsound
+                for fr, du in seq:
+                    winsound.Beep(fr, du)
+            except Exception:
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
+    def save_cfg(self):
+        try:
+            self.cfg["pos"] = f"+{self.root.winfo_x()}+{self.root.winfo_y()}"
+            tmp = CFG_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.cfg))
+            os.replace(tmp, CFG_PATH)
+        except Exception:
+            logging.exception("save_cfg")
+
+    def apply_theme(self):
+        self.root.configure(bg=self.accent)
+        self.title_lbl.config(fg=self.accent)
+        self.hero.config(fg=self.accent)
+
+    def set_theme(self, col):
+        self.accent = self.cfg["accent"] = col
+        self.apply_theme()
+        self.save_cfg()
+
+    def set_alpha(self, a):
+        self.alpha = self.cfg["alpha"] = a
+        self.root.attributes("-alpha", a)
+        self.save_cfg()
+
+    def toggle_compact(self):
+        self.compact = self.cfg["compact"] = not self.compact
+        if self.compact:
+            self.detail.pack_forget()
+        else:
+            self.detail.pack(fill="x", before=self.status)
+        self.save_cfg()
+
+    def toggle_sound(self):
+        self.cfg["sound"] = not self.cfg.get("sound", True)
+        self.save_cfg()
+        self.say("Sound " + ("on" if self.cfg["sound"] else "off"), 4)
+
+    def start_timer(self):
+        mins = simpledialog.askinteger("EXP timer", "Minutes (e.g. 30 for an EXP coupon):", parent=self.root,
+                                       initialvalue=self.cfg.get("timer_min", 30), minvalue=1, maxvalue=600)
+        if mins:
+            self.cfg["timer_min"] = mins
+            self.timer_end, self._t60 = time.time() + mins * 60, False
+            self.save_cfg()
+
+    def open_folder(self):
+        try:
+            os.startfile(str(DATA_DIR))
+        except Exception:
+            self.say(f"Data folder: {DATA_DIR}", 15)
+
+    def copy_summary(self):
+        s = self.trk.snapshot(time.time())
+        e, m = s["exp"], s["meso"]
+        ph = e["avg_pct"] or 0
+        lv = "Lv?"
+        if e["start"]:
+            lv = f"Lv{e['start'][0]}" + (f"->{e['level']}" if e["levels"] else "")
+        txt = (f"MapleStory Classic | {lv} | {fmt_time(s['elapsed'])} | +{fmt(e['cum_exp'])} EXP ({e['cum_pct']:.1f}%) | "
+               f"{fmt(e['avg_exp'])} EXP/hr ({ph:.1f}%/hr, {tier_of(ph)[0][0]}) | mesos +{fmt(m['gain'])} "
+               f"({fmt(m['avg'])}/hr) | ~{e['events']} hits, {e['deaths']} death(s)")
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(txt)
+            self.root.update_idletasks()
+            self.say("Summary copied to clipboard", 6)
+        except Exception:
+            logging.exception("copy_summary")
+
+    def show_menu(self):
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="Full view" if self.compact else "Compact view", command=self.toggle_compact)
+        om = tk.Menu(m, tearoff=0)
+        for pct in (100, 85, 70, 50, 35):
+            om.add_command(label=f"{pct}%", command=lambda p=pct: self.set_alpha(p / 100))
+        m.add_cascade(label="Opacity", menu=om)
+        tm = tk.Menu(m, tearoff=0)
+        for name, col in THEMES.items():
+            tm.add_command(label=name, command=lambda c=col: self.set_theme(c))
+        m.add_cascade(label="Theme", menu=tm)
+        m.add_command(label="Sound: " + ("on" if self.cfg.get("sound", True) else "off"), command=self.toggle_sound)
+        m.add_separator()
+        m.add_command(label="Set level...", command=self.ask_level)
+        m.add_command(label="Start EXP timer...", command=self.start_timer)
+        if self.timer_end:
+            m.add_command(label="Stop timer", command=lambda: setattr(self, "timer_end", None))
+        m.add_command(label="Copy session summary", command=self.copy_summary)
+        m.add_command(label="Open data folder", command=self.open_folder)
+        m.add_separator()
+        m.add_command(label="Reselect EXP region", command=lambda: self.select_region("exp"))
+        m.add_command(label="Reselect meso region", command=lambda: self.select_region("meso"))
+        m.add_separator()
+        m.add_command(label="Quit", command=self.quit)
+        try:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            m.grab_release()
+
+    def tick(self):
+        """Housekeeping every refresh: toasts, timer, autosave."""
+        now = time.time()
+        e = self.trk.snapshot(now)["exp"]
+        if e["levels"] > self._plv:
+            self.say(f"LEVEL UP!  Lv {e['level']}", 12)
+            self.beep("up")
+        self._plv = e["levels"]
+        ph = e["r5"][1] * 60 if e["r5"][1] else e["avg_pct"]
+        if ph:
+            idx = [t[0] for t in TIERS].index(tier_of(ph)[0][0])
+            if self._tmax >= 0 and idx > self._tmax:
+                self.say(f"PROMOTED to {TIERS[idx][0]}!", 12)
+                self.beep("up")
+            self._tmax = max(self._tmax, idx)
+        if self.timer_end:
+            left = self.timer_end - now
+            if left <= 0:
+                self.timer_end = None
+                self.say("TIMER DONE - refresh your buff/coupon", 20)
+                self.beep("done")
+            elif left <= 60 and not self._t60:
+                self._t60 = True
+                self.say("Timer: 1 minute left", 8)
+                self.beep("warn")
+        if now - self.last_auto >= 30:
+            self.last_auto = now
+            self.autosave()
+
     def do_pause(self):
         self.trk.toggle_pause()
-        self.pause_btn.config(text="▶" if self.trk.paused else "⏸")
+        if self.trk.paused:
+            self.autosave()
 
     def do_reset(self):
         self.session_form()
@@ -584,8 +788,8 @@ class App:
         """On reset: ask for context (class/map/route/party/notes) and optionally upload the run."""
         snap = self.trk.snapshot(time.time())
         if not API_URL or snap["elapsed"] < 600:     # nothing uploadable
-            self.save_session()
-            self.trk.reset()
+            if self.save_session() != "error":
+                self.trk.reset()
             return
         top = tk.Toplevel(self.root)
         top.title("Session details")
@@ -611,8 +815,8 @@ class App:
                 ps = re.sub(r"\D", "", d["party_size"])
                 d["party_size"] = min(6, max(1, int(ps))) if ps else 1
                 d["name"] = d["name"][:24] or "Player"
-            self.save_session(d if upload else None)
-            self.trk.reset()
+            if self.save_session(d if upload else None) != "error":
+                self.trk.reset()
 
         bt = tk.Frame(top, bg=BG)
         bt.grid(row=len(fields), column=0, columnspan=2, pady=8)
@@ -630,9 +834,9 @@ class App:
                      "Content-Type": "application/json", "Prefer": "resolution=ignore-duplicates,return=minimal"})
         try:
             urllib.request.urlopen(req, timeout=15).read()
-            self.notice = "✔ uploaded to leaderboard"
+            self.say("Uploaded to leaderboard", 10)
         except Exception as ex:
-            self.notice = f"✖ upload failed: {str(ex)[:40]}"
+            self.say(f"Upload failed: {str(ex)[:40]}", 15)
 
     # ---------- OCR worker ----------
     @staticmethod
@@ -683,24 +887,56 @@ class App:
         self.trk.update_exp(raws, pcts, time.time(), final=True)
 
     def worker(self):
-        engine = RapidOCR()
+        try:
+            engine = RapidOCR()
+        except Exception as ex:
+            logging.exception("OCR engine failed to start")
+            self.fatal = f"OCR engine failed: {str(ex)[:40]}"
+            return
+        last_err = {}
         with mss.mss() as sct:
             while self.run:
-                if self.selecting or time.time() < self.resume_at:
-                    time.sleep(0.2)
-                    continue
-                if not self.trk.paused:
+                try:
+                    if self.selecting or self.trk.paused or time.time() < self.resume_at:
+                        time.sleep(0.2)
+                        continue
+                    mon = sct.monitors[0]
                     for key, fn in (("exp", self.read_exp), ("meso", self.read_meso)):
                         reg = self.cfg.get(key + "_region")
-                        if reg:
-                            try:
-                                fn(sct, engine, reg)
-                            except Exception as ex:
-                                self.ocr[key] = f"error: {ex}"
-                time.sleep(0.5)
+                        if not reg:
+                            continue
+                        if (reg["left"] < mon["left"] or reg["top"] < mon["top"]
+                                or reg["left"] + reg["width"] > mon["left"] + mon["width"]
+                                or reg["top"] + reg["height"] > mon["top"] + mon["height"]):
+                            self.ocr[key] = "region is off-screen: reselect it (menu)"
+                            continue
+                        try:
+                            fn(sct, engine, reg)
+                            last_err.pop(key, None)
+                        except Exception as ex:
+                            self.ocr[key] = f"error: {ex}"
+                            if last_err.get(key) != str(ex):
+                                logging.exception("reading %s", key)
+                                last_err[key] = str(ex)
+                    time.sleep(0.5)
+                except Exception:
+                    logging.exception("worker loop")
+                    time.sleep(1)
 
     # ---------- refresh ----------
     def refresh(self):
+        try:
+            self._refresh()
+            self.tick()
+        except Exception:
+            logging.exception("refresh failed")
+        finally:               # always reschedule so the overlay can never freeze on one bad frame
+            try:
+                self.root.after(500, self.refresh)
+            except Exception:
+                pass
+
+    def _refresh(self):
         s = self.trk.snapshot(time.time())
         e, m, c, mc = s["exp"], s["meso"], self.cells, self.mcells
         f = lambda v: fmt(v) if v is not None else "--"
@@ -728,7 +964,7 @@ class App:
                 txt += f"  ·  +{nxt[1] - ph:.1f} to {nxt[0]}"
             base = self.hist_base
             if base:
-                txt += f"\n⚡ Efficiency {ph / (sum(base) / len(base)) * 100:.0f}% of your last {len(base)} runs"
+                txt += f"\nEfficiency {ph / (sum(base) / len(base)) * 100:.0f}% of your last {len(base)} runs"
             self.tier_lbl.config(text=txt, fg=col)
         else:
             self.tier_lbl.config(text="◆ UNRANKED  (needs ~20s of data)", fg=DIM)
@@ -740,11 +976,15 @@ class App:
         c["rem"].config(text=f(e["remaining"]))
         c["eta"].config(text=fmt_time(e["eta"]))
         c["time"].config(text=fmt_time(s["elapsed"]))
+        c["hits"].config(text=f"{e['hits']:.1f}" if e["hits"] is not None else "--")
+        c["avghit"].config(text=f(e["avg_hit"]))
+        c["peak"].config(text=f(e["peak"]) if e["peak"] else "--")
+        c["deaths"].config(text=f"{e['deaths']} ({fmt(e['lost'])})")
 
         mhr = m["r5"] * 60 if m["r5"] else m["avg"]
         self.meso_hero.config(text=f(mhr))
         if m["start"] is not None:
-            self.meso_line.config(text=f"Start {m['start']:,}  →  Now {m['cur']:,}   (net {m['net']:+,})")
+            self.meso_line.config(text=f"Start {m['start']:,}  →  Now {(m['cur'] if m['cur'] is not None else m['start']):,}   (net {m['net']:+,})")
         else:
             self.meso_line.config(text="no meso region set (◎) or not read yet")
         mc["r1"].config(text=f(m["r1"]))
@@ -755,14 +995,21 @@ class App:
         mc["spent"].config(text=fmt(m["spent"]))
 
         self.dot.config(fg=WARN if s["paused"] else (DIM if s["idle"] else GOOD))
+        self.pause_btn.config(text="RESUME" if s["paused"] else "PAUSE")
         state = ("PAUSED  " if s["paused"] else "IDLE (no gains 60s)  " if s["idle"] else
                  "UNSTABLE: check EXP box / click level  " if s["unstable"] else "")
-        state = (self.notice + "  " if self.notice else "") + state
+        if self.timer_end:
+            left = max(0, int(self.timer_end - time.time()))
+            state = f"TIMER {left // 60}:{left % 60:02d}  " + state
+        if self.fatal:
+            state = self.fatal + "  " + state
+        if time.time() < self.notice_until:
+            state = self.notice + "  " + state
         self.status.config(text=f"{state}EXP: {self.ocr['exp'][:34] or '…'}\nMESO: {self.ocr['meso'][:34] or '…'}")
 
         self.bar.delete("all")
         if e["cur"]:
-            self.bar.create_rectangle(0, 0, W * e["cur"][1] / 100, 6, fill=ACCENT, width=0)
+            self.bar.create_rectangle(0, 0, W * e["cur"][1] / 100, 6, fill=self.accent, width=0)
         self.spark.delete("all")
         pts = e["spark"]
         if len(pts) > 1:
@@ -771,51 +1018,113 @@ class App:
             xy = []
             for i, v in enumerate(pts):
                 xy += [i * W / (len(pts) - 1), 28 - (v - lo) / span * 24]
-            self.spark.create_line(*xy, fill=ACCENT, width=2, smooth=True)
-        self.root.after(500, self.refresh)
+            self.spark.create_line(*xy, fill=self.accent, width=2, smooth=True)
 
     # ---------- persistence ----------
-    def save_session(self, details=None):
+    def make_record(self):
         s = self.trk.snapshot(time.time())
         e, m = s["exp"], s["meso"]
-        if s["elapsed"] < 30 or (e["cum_exp"] == 0 and m["gain"] == 0 and m["spent"] == 0):
-            return
         rec = dict(ended=datetime.now().isoformat(timespec="seconds"), elapsed_sec=int(s["elapsed"]),
                    start_level=e["start"][0] if e["start"] else 0, levels_gained=e["levels"],
                    exp_gained=int(e["cum_exp"]), pct_gained=round(e["cum_pct"], 3),
                    pct_per_hr=round(e["avg_pct"] or 0, 3), exp_per_hr=int(e["avg_exp"] or 0),
-                   meso_gained=m["gain"], meso_per_hr=int(m["avg"] or 0))
-        rec["player_id"] = self.cfg.get("player_id")
-        if details:
-            rec.update({k: v for k, v in details.items() if v not in ("", None)})
-        with open(JSONL_PATH, "a") as fh:      # one JSON per line, paste/upload into the web dashboard
-            fh.write(json.dumps(rec) + "\n")
+                   meso_gained=m["gain"], meso_spent=m["spent"], meso_per_hr=int(m["avg"] or 0),
+                   deaths=e["deaths"], player_id=self.cfg.get("player_id"))
+        return rec, s
+
+    @staticmethod
+    def _write_rec(rec):
+        errs = []
         try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(json.dumps(rec))
-            self.root.update()
+            with open(JSONL_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except Exception as ex:
+            logging.exception("jsonl write")
+            errs.append(f"JSON: {ex}")
+        try:
+            new = not LOG_PATH.exists()
+            with open(LOG_PATH, "a", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                if new:
+                    w.writerow(CSV_COLS)
+                w.writerow([rec.get(k, "") for k in CSV_COLS])
+        except Exception as ex:
+            logging.exception("csv write")
+            errs.append(f"CSV: {ex} (close it in Excel?)")
+        return errs
+
+    def autosave(self):
+        """Crash insurance: snapshot of the running session, recovered on next launch."""
+        try:
+            rec, s = self.make_record()
+            if s["elapsed"] < 30 or not (rec["exp_gained"] or rec["meso_gained"] or rec["meso_spent"]):
+                return
+            tmp = AUTOSAVE_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(rec))
+            os.replace(tmp, AUTOSAVE_PATH)
         except Exception:
-            pass
-        self.hist_base = history()
-        if details and API_URL:
-            threading.Thread(target=self._post, args=(rec,), daemon=True).start()
-        new = not LOG_PATH.exists()
-        with open(LOG_PATH, "a", newline="") as fh:
-            w = csv.writer(fh)
-            if new:
-                w.writerow(["ended", "elapsed_sec", "start_level", "levels_gained", "exp_gained",
-                            "pct_gained", "exp_per_hr", "meso_gained", "meso_spent", "meso_per_hr"])
-            w.writerow([datetime.now().isoformat(timespec="seconds"), int(s["elapsed"]),
-                        e["start"][0] if e["start"] else "", e["levels"], int(e["cum_exp"]),
-                        round(e["cum_pct"], 3), int(e["avg_exp"] or 0), m["gain"], m["spent"],
-                        int(m["avg"] or 0)])
+            logging.exception("autosave")
+
+    def recover(self):
+        try:
+            if AUTOSAVE_PATH.exists():
+                rec = json.loads(AUTOSAVE_PATH.read_text())
+                AUTOSAVE_PATH.unlink()
+                if rec.get("elapsed_sec", 0) >= 30:
+                    rec["recovered"] = True
+                    self._write_rec(rec)
+                    self.say("Recovered an unsaved session from last time", 20)
+        except Exception:
+            logging.exception("recover")
+
+    def save_session(self, details=None):
+        """-> 'saved' | 'empty' | 'error'. Never raises."""
+        try:
+            rec, s = self.make_record()
+            if s["elapsed"] < 30 or not (rec["exp_gained"] or rec["meso_gained"] or rec["meso_spent"]):
+                self.say("Nothing to save: no EXP/meso gains tracked yet", 8)
+                return "empty"
+            if details:
+                rec.update({k: v for k, v in details.items() if v not in ("", None)})
+            errs = self._write_rec(rec)
+            if len(errs) == 2:
+                self.say("Could not save: " + errs[0][:60], 15)
+                return "error"
+            try:
+                AUTOSAVE_PATH.unlink()
+            except Exception:
+                pass
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(json.dumps(rec))
+                self.root.update_idletasks()
+            except Exception:
+                pass
+            self.hist_base = history()
+            if details and API_URL:
+                threading.Thread(target=self._post, args=(rec,), daemon=True).start()
+            self.say(("Saved with warnings: " + errs[0][:50]) if errs else f"Saved to {DATA_DIR}", 12)
+            return "saved"
+        except Exception:
+            logging.exception("save_session")
+            self.say(f"Save failed - see tracker.log in {DATA_DIR}", 15)
+            return "error"
 
     def quit(self):
         self.run = False
-        self.save_session()
-        self.cfg["pos"] = f"+{self.root.winfo_x()}+{self.root.winfo_y()}"
-        CFG_PATH.write_text(json.dumps(self.cfg))
-        self.root.destroy()
+        try:
+            if self.save_session() == "empty":
+                try:
+                    AUTOSAVE_PATH.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            logging.exception("quit save")
+        self.save_cfg()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

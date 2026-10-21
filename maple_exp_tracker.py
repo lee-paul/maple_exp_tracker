@@ -78,8 +78,8 @@ ACCENT, MESO, WARN, GOOD = "#00f0c8", "#ffd166", "#ffb347", "#7CFF8A"
 PCT_RE = re.compile(r"(?<!\d)(\d{1,3})\s*[.,]\s*(\d{2})\s*%")
 MESO_RE = re.compile(r"\d{1,3}(?:,\d{3})+|\d+")
 W = 290
-API_URL = ""   # your Supabase project URL, e.g. https://abcdxyz.supabase.co  (leave empty = no uploads)
-API_KEY = ""   # your Supabase anon (public) key
+API_URL = "https://shbotrebianwkibexqcn.supabase.co"   # your Supabase project URL, e.g. https://abcdxyz.supabase.co  (leave empty = no uploads)
+API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoYm90cmViaWFud2tpYmV4cWNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI1NTUzNTAsImV4cCI6MjEwODEzMTM1MH0.gSwds8itoLIoKl-_Gj2Ea5lMed8tNzfNT-x8RGDFm9w"   # your Supabase anon (public) key
 JSONL_PATH = DATA_DIR / "maple_sessions.jsonl"
 # tiers by % of a level gained per hour (same thresholds as the web leaderboard)
 TIERS = [("Bronze", 0, "#cd7f32"), ("Silver", 4, "#b8c2cc"), ("Gold", 8, "#f5c542"),

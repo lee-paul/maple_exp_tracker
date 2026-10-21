@@ -33,7 +33,7 @@ textarea{width:100%;min-height:130px;font-family:ui-monospace,Consolas,monospace
 // ---- configure these two (Supabase > Project Settings > API) and your release link ----
 const SB_URL="https://shbotrebianwkibexqcn.supabase.co";   // e.g. "https://abcdxyz.supabase.co"
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoYm90cmViaWFud2tpYmV4cWNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI1NTUzNTAsImV4cCI6MjEwODEzMTM1MH0.gSwds8itoLIoKl-_Gj2Ea5lMed8tNzfNT-x8RGDFm9w";   // the public "anon" key (safe to expose; row-level security protects the data)
-const DOWNLOAD_URL="https://github.com/YOUR_USER/YOUR_REPO/releases/latest/download/MapleTracker-windows.zip";
+const DOWNLOAD_URL="https://github.com/lee-paul/maple_exp_tracker/releases/latest/download/MapleTracker-windows.zip";
 const $=s=>document.querySelector(s);
 const TIERS=[{n:"Bronze",min:0,c:"#cd7f32"},{n:"Silver",min:4,c:"#b8c2cc"},{n:"Gold",min:8,c:"#f5c542"},{n:"Platinum",min:14,c:"#5ad1c8"},{n:"Diamond",min:22,c:"#6aa7ff"},{n:"Master",min:35,c:"#c77dff"},{n:"Legend",min:55,c:"#ff6b6b"}];
 const tierOf=p=>[...TIERS].reverse().find(t=>p>=t.min);
